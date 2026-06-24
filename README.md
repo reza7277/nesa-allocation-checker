@@ -1,12 +1,11 @@
 # Nesa Allocation Checker
 
-Check your **Nesa miner rewards allocation** using only your previously saved node private key.
-No server/node needed. **Read-only — it never submits a claim.**
+Tools to check your **Nesa miner rewards allocation** using your saved node private key — or, if you lost the key, recover it from your wallet seed phrase. **Read-only — nothing here ever submits a claim.**
 
-It reuses the official [`nesaorg/miner-rewards-cli`](https://github.com/nesaorg/miner-rewards-cli) crypto/identity logic, so the derived identity matches exactly, but stops right after showing your allocation.
+Both scripts reuse the official [`nesaorg/miner-rewards-cli`](https://github.com/nesaorg/miner-rewards-cli) crypto/identity logic, so derived identities match exactly.
 
 ## Requirements
-- `python3` and `curl` (the script auto-installs its Python deps in an isolated venv)
+- `python3` and `curl` (scripts auto-install their Python deps in an isolated venv)
 
 ## Clone
 ```bash
@@ -14,24 +13,39 @@ git clone https://github.com/reza7277/nesa-allocation-checker.git
 cd nesa-allocation-checker
 ```
 
-## Run
+---
+
+## 1. Check allocation (you have your private key)
 ```bash
 bash check-nesa-allocation.sh
 ```
-When prompted, paste your node private key (64-char hex, no `0x` prefix). Input is hidden.
+Paste your node private key (64-char hex, no `0x`). It derives your Cosmos address + Node ID, prints your allocation (aNES + NES), and stops. No claim.
 
-The script will:
-1. Derive your Cosmos address + Node/miner ID from the key (locally).
-2. Query the official Nesa rewards endpoint and print your allocation (aNES + NES).
-3. Stop — **nothing is claimed.**
+---
+
+## 2. Recover key from seed (you lost the private key)
+If you lost `NODE_PRIV_KEY` but still have your **wallet seed phrase** and know your **Node ID**:
+```bash
+bash recover-nesa-key-from-seed.sh
+```
+It asks for your Node ID and seed phrase (hidden input), derives candidate keys across common BIP44 paths / coin types, and finds the one whose derived Node ID matches yours. On a match it prints the recovered private key and checks your allocation.
+
+Widen the search with extra coin types if needed:
+```bash
+NESA_EXTRA_COINS='234 564 818' bash recover-nesa-key-from-seed.sh
+```
+
+**Caveat:** this only works if your node key was derived from this wallet. If the node generated its own random key, no derivation path will match.
+
+---
 
 ## Security
-- Your private key is used **locally only** and stored in a temp file that is auto-deleted on exit.
+- Your private key / seed are used **locally only** and stored in a temp file that is auto-deleted on exit.
 - Only a **read-only** allocation query is sent to `rewards-proxy.nesa.ai`.
-- **Never share your private key or mnemonic with anyone.** Run this only on a machine you trust.
+- A **seed phrase is even more sensitive than a private key** — it controls your whole wallet. **Never share it with anyone.** Run these scripts only on a machine you fully trust.
 
 ## Want to actually claim?
-Use the official CLI:
+Use the official CLI with your key:
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/nesaorg/miner-rewards-cli/main/claim-rewards.sh)
 ```
