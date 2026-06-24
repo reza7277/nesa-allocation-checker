@@ -2,15 +2,19 @@
 #
 # check-nesa-allocation.sh
 # ------------------------
-# Prompts for your previous Nesa node private key, then checks ONLY your
-# rewards allocation from the official nesaorg/miner-rewards-cli.
+# Check your Nesa miner rewards allocation. Two modes:
 #
-# It does NOT submit a claim. It reuses the official script's crypto/identity
-# logic (so derivation matches exactly), but stops right after showing the
-# allocation. Nothing is ever sent except the read-only allocation query.
+#   1. Private-key mode (default): reads your node private key, derives your
+#      identity locally, and checks your allocation.
+#
+#   2. Node-ID mode:  bash check-nesa-allocation.sh --node-id <NODE_ID>
+#      Checks allocation using ONLY your Node ID. No private key needed.
+#
+# Read-only: it NEVER submits a claim.
 #
 # Usage:
-#   bash check-nesa-allocation.sh
+#   bash check-nesa-allocation.sh                 # asks for private key
+#   bash check-nesa-allocation.sh --node-id <ID>  # node ID only
 #
 set -euo pipefail
 
@@ -28,6 +32,21 @@ DEPS=(
 
 err()      { echo "Error: $*" >&2; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# --- parse args -----------------------------------------------------------
+NODE_ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --node-id)
+      NODE_ID="${2:-}"; shift 2 || { err "--node-id requires a value."; exit 1; } ;;
+    --node-id=*)
+      NODE_ID="${1#*=}"; shift ;;
+    -h|--help)
+      grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)
+      err "Unknown argument: $1"; exit 1 ;;
+  esac
+done
 
 # --- prerequisites --------------------------------------------------------
 if ! have_cmd python3; then err "python3 is required but was not found."; exit 1; fi
@@ -65,9 +84,6 @@ fi
 echo "Downloading official Nesa CLI ..."
 curl -fsSL "$OFFICIAL_URL" -o "$OFFICIAL_SH"
 
-# Extract everything inside the  <<'PY_APP' ... PY_APP  heredoc, but stop
-# before the `if __name__ == "__main__":` guard so importing it does NOT run
-# the interactive claim flow. We only want its functions.
 awk '
   /<<'\''PY_APP'\''/ { capture=1; next }
   capture && /^if __name__ == "__main__":/ { exit }
@@ -79,15 +95,68 @@ if [ ! -s "$MODULE_PY" ]; then
   exit 1
 fi
 
-# --- prompt for the private key (hidden input) ----------------------------
+# ==========================================================================
+# MODE 2: Node-ID only
+# ==========================================================================
+if [ -n "$NODE_ID" ]; then
+  NODE_ID="$(printf '%s' "$NODE_ID" | tr -d '[:space:]')"
+  NODE_ID="$NODE_ID" MODULE_PY="$MODULE_PY" "$PYTHON" - <<'PY_DRIVER'
+import importlib.util, json, os, sys
+from decimal import Decimal
+
+m_path = os.environ["MODULE_PY"]; node_id = os.environ["NODE_ID"]
+spec = importlib.util.spec_from_file_location("nesa_cli", m_path)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+def banner(t):
+    line = "=" * max(8, len(t) + 4); print(f"\n{line}\n  {t}\n{line}")
+
+# The rewards server keys allocation off node_id; cosmos_address only needs to
+# be present and well-formed, so we send a fixed placeholder address.
+PLACEHOLDER_ADDR = "nesa1w508d6qejxtdg4y5r3zarvary0c5xw7kcc5gqf"
+
+banner("Checking allocation (node ID only)")
+print(f"Node / miner ID: {node_id}")
+try:
+    resp = m.get_json(
+        m.DEFAULT_ALLOCATION_ENDPOINT,
+        params={"cosmos_address": PLACEHOLDER_ADDR, "node_id": node_id},
+    )
+    try:
+        amount = m.extract_allocation_amount(resp)
+    except Exception:
+        amount = Decimal("0")
+    print(m.allocation_display_line(resp))
+    if m.allocation_claimed(resp):
+        print("\nThis allocation has ALREADY been claimed.")
+    elif amount <= Decimal("0"):
+        print("\nNo claimable allocation found for this Node ID.")
+    else:
+        print(f"\nClaimable allocation: {m.allocation_display_line(resp)}")
+        print("This script only CHECKS the allocation and does not claim it.")
+except m.CliError as exc:
+    body = getattr(exc, "body", None)
+    print(f"\nError: {exc}", file=sys.stderr)
+    if isinstance(body, dict):
+        print(json.dumps(body, indent=2), file=sys.stderr)
+    sys.exit(1)
+PY_DRIVER
+  echo
+  echo "Done."
+  exit 0
+fi
+
+# ==========================================================================
+# MODE 1: Private-key (default)
+# ==========================================================================
 echo
 echo "Paste your previous node private key (64-char hex, no 0x prefix)."
 echo "Input is hidden and stored only in a temp file that is deleted on exit."
+echo "(Tip: to check with just your Node ID instead, re-run with --node-id <ID>.)"
 printf "NODE_PRIV_KEY: "
 read -rs NODE_PRIV_KEY
 echo
 
-# strip optional 0x and surrounding whitespace/quotes
 NODE_PRIV_KEY="$(printf '%s' "$NODE_PRIV_KEY" | tr -d '[:space:]"'"'"'' )"
 NODE_PRIV_KEY="${NODE_PRIV_KEY#0x}"
 
@@ -101,7 +170,6 @@ printf 'NODE_PRIV_KEY="%s"\n' "$NODE_PRIV_KEY" > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 unset NODE_PRIV_KEY
 
-# --- run the check-only driver -------------------------------------------
 ENV_FILE="$ENV_FILE" MODULE_PY="$MODULE_PY" "$PYTHON" - <<'PY_DRIVER'
 import importlib.util, json, os, sys
 from decimal import Decimal
@@ -111,7 +179,7 @@ env_path    = os.environ["ENV_FILE"]
 
 spec = importlib.util.spec_from_file_location("nesa_cli", module_path)
 m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)  # defines functions only; no claim flow runs
+spec.loader.exec_module(m)
 
 def banner(t):
     line = "=" * max(8, len(t) + 4)
