@@ -108,6 +108,22 @@ m_path = os.environ["MODULE_PY"]; node_id = os.environ["NODE_ID"]
 spec = importlib.util.spec_from_file_location("nesa_cli", m_path)
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
+import time
+def get_json_retry(url, params, attempts=5, delay=10):
+    last = None
+    for i in range(attempts):
+        try:
+            return m.get_json(url, params=params)
+        except m.CliError as exc:
+            sc = getattr(exc, "status_code", None)
+            last = exc
+            if (sc in (500, 502, 503, 504) or sc is None) and i < attempts - 1:
+                print(f"  Transient server error (HTTP {sc}); retrying in {delay}s ... ({i+1}/{attempts})")
+                time.sleep(delay)
+                continue
+            raise
+    raise last
+
 def banner(t):
     line = "=" * max(8, len(t) + 4); print(f"\n{line}\n  {t}\n{line}")
 
@@ -118,7 +134,7 @@ PLACEHOLDER_ADDR = "nesa1w508d6qejxtdg4y5r3zarvary0c5xw7kcc5gqf"
 banner("Checking allocation (node ID only)")
 print(f"Node / miner ID: {node_id}")
 try:
-    resp = m.get_json(
+    resp = get_json_retry(
         m.DEFAULT_ALLOCATION_ENDPOINT,
         params={"cosmos_address": PLACEHOLDER_ADDR, "node_id": node_id},
     )
@@ -181,6 +197,22 @@ spec = importlib.util.spec_from_file_location("nesa_cli", module_path)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
+import time
+def get_json_retry(url, params, attempts=5, delay=10):
+    last = None
+    for i in range(attempts):
+        try:
+            return m.get_json(url, params=params)
+        except m.CliError as exc:
+            sc = getattr(exc, "status_code", None)
+            last = exc
+            if (sc in (500, 502, 503, 504) or sc is None) and i < attempts - 1:
+                print(f"  Transient server error (HTTP {sc}); retrying in {delay}s ... ({i+1}/{attempts})")
+                time.sleep(delay)
+                continue
+            raise
+    raise last
+
 def banner(t):
     line = "=" * max(8, len(t) + 4)
     print(f"\n{line}\n  {t}\n{line}")
@@ -196,7 +228,7 @@ try:
     print(f"Node / miner ID: {node_id}")
 
     banner("Checking allocation")
-    resp = m.get_json(
+    resp = get_json_retry(
         m.DEFAULT_ALLOCATION_ENDPOINT,
         params={"cosmos_address": cosmos, "node_id": node_id},
     )
