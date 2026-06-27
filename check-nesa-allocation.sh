@@ -8,7 +8,8 @@
 #   2) Private key checker        - check allocation from one private key
 #   3) Batch private key checker  - paste many private keys, check them all
 #   4) Match keys to node IDs     - find which key unlocks each eligible node ID
-#   5) Claim rewards              - submit a real claim via the official Nesa CLI
+#   5) Recover key from seed      - search a BIP39 seed for the node's private key
+#   6) Claim rewards              - submit a real claim via the official Nesa CLI
 #
 # Options 1-4 are READ-ONLY: they NEVER submit a claim. Option 5 hands off to
 # the official nesaorg/miner-rewards-cli so derived identities & signing match
@@ -28,6 +29,7 @@ DEPS=(
   "bech32==1.2.0"
   "cryptography==43.0.3"
   "base58==2.1.1"
+  "bip-utils==2.9.3"
 )
 
 # --- colors (only if stdout is a terminal) --------------------------------
@@ -66,7 +68,7 @@ setup() {
   PIP="$VENV_DIR/bin/pip"
 
   if ! "$PYTHON" - <<'PY_CHECK' >/dev/null 2>&1
-import requests, coincurve, bech32, base58
+import requests, coincurve, bech32, base58, bip_utils
 from cryptography.hazmat.primitives.asymmetric import ed25519
 PY_CHECK
   then
@@ -255,6 +257,84 @@ def main():
         else:
             print(f"  {GRN}All eligible node IDs were matched to a key!{R}")
         return
+
+    elif mode == "seed":
+        from bip_utils import (Bip39SeedGenerator, Bip39MnemonicValidator,
+                               Bip32Slip10Secp256k1)
+        banner("Recover node key from seed")
+        targets, mnemonic = [], None
+        for ln in open(sys.argv[2], encoding="utf-8"):
+            ln = ln.rstrip("\n")
+            if not ln.strip():
+                continue
+            tag, _, val = ln.partition(" ")
+            val = val.strip()
+            if tag == "T":
+                targets.append(val)
+            elif tag == "S":
+                mnemonic = val
+        targets = list(dict.fromkeys(targets))  # de-dupe, keep order
+        if not mnemonic or not targets:
+            print(f"{RED}Need a seed phrase and at least one node ID.{R}"); return
+        if not Bip39MnemonicValidator().IsValid(mnemonic):
+            print(f"{RED}That seed phrase is not a valid BIP39 mnemonic.{R}")
+            print(f"{DIM}Check the words/spelling/order (12 or 24 words).{R}"); return
+
+        passphrase = os.environ.get("NESA_BIP39_PASSPHRASE", "")
+        seed_bytes = Bip39SeedGenerator(mnemonic).Generate(passphrase)
+
+        base_coins = [118, 60, 0, 529, 330, 459, 494]
+        extra = [int(x) for x in os.environ.get("NESA_EXTRA_COINS", "").split() if x.isdigit()]
+        coins = base_coins + [c for c in extra if c not in base_coins]
+        n_acct = int(os.environ.get("NESA_ACCOUNTS", "8"))
+        n_idx  = int(os.environ.get("NESA_INDEXES", "30"))
+
+        print(f"  {DIM}Targets: {len(targets)} | coin types: {coins}{R}")
+        print(f"  {DIM}Scanning accounts 0-{n_acct-1}, change 0/1, index 0-{n_idx-1}...{R}")
+
+        remaining = set(targets)
+        found = {}
+        tried = 0
+        for coin in coins:
+            if not remaining:
+                break
+            for a in range(n_acct):
+                if not remaining:
+                    break
+                for ch in (0, 1):
+                    if not remaining:
+                        break
+                    for i in range(n_idx):
+                        path = f"m/44'/{coin}'/{a}'/{ch}/{i}"
+                        k = Bip32Slip10Secp256k1.FromSeedAndPath(seed_bytes, path).PrivateKey().Raw().ToBytes().hex()
+                        tried += 1
+                        nid = m.derive_node_identity_from_private_key_hex(k)["node_id"]
+                        if nid in remaining:
+                            found[nid] = (path, k)
+                            remaining.discard(nid)
+                            if not remaining:
+                                break
+        print(f"  {DIM}Derivations tried: {tried}{R}\n")
+
+        for nid in targets:
+            if nid in found:
+                path, k = found[nid]
+                cosmos = m.cosmos_address_from_private_key(m.PrivateKey(bytes.fromhex(k)), m.DEFAULT_BECH32_PREFIX)
+                res = query(nid, cosmos)
+                print(f"  {GRN}\u2713 FOUND{R}  {B}{nid}{R}")
+                print(f"     {DIM}path:{R}   {path}")
+                print(f"     {DIM}cosmos:{R} {cosmos}")
+                print(f"     {RED}{B}PRIVATE KEY:{R} {k}")
+                print_result(res, label=nid)
+            else:
+                print(f"  {RED}\u2717 not found{R}  {nid}  {DIM}(no derivation path from this seed){R}")
+
+        if found:
+            print(f"\n{YEL}{B}Keep that PRIVATE KEY secret.{R} {DIM}Use it with option 6 (Claim) to withdraw.{R}")
+        if remaining:
+            print(f"\n{DIM}Couldn't match {len(remaining)} ID(s). Widen the search and retry, e.g.:{R}")
+            print(f"{DIM}  NESA_ACCOUNTS=16 NESA_INDEXES=60 NESA_EXTRA_COINS='234 564 818' bash check-nesa-allocation.sh{R}")
+        return
     else:
         print(f"{RED}Unknown mode: {mode}{R}"); sys.exit(1)
 
@@ -362,6 +442,36 @@ collect_match() {
   return 0
 }
 
+collect_seed() {
+  : > "$INPUT_FILE"
+  echo
+  printf "${B}Seed recovery:${R} find the private key (from your seed phrase) that built\n"
+  printf "an eligible node ID. ${B}Everything stays local.${R}\n"
+  printf "${B}Step 1${R} - paste the ${B}eligible Node ID(s)${R} you want the key for (one per line).\n"
+  printf "Press ${B}Enter on an empty line${R} to finish:\n"
+  local line n=0
+  while true; do
+    printf "  Node ID #%d: " "$((n+1))"
+    read -r line || break
+    line="$(printf '%s' "$line" | tr -d '[:space:]')"
+    [ -z "$line" ] && break
+    printf 'T %s\n' "$line" >> "$INPUT_FILE"
+    n=$((n+1))
+  done
+  [ "$n" -eq 0 ] && { err "No node IDs entered."; return 1; }
+  echo
+  printf "${B}Step 2${R} - paste your ${B}seed phrase${R} (12/24 words, space-separated). Input is ${B}hidden${R}:\n"
+  printf "  SEED: "
+  local s; read -rs s; echo
+  # collapse extra whitespace, trim ends
+  s="$(printf '%s' "$s" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')"
+  [ -z "$s" ] && { err "No seed entered."; return 1; }
+  printf 'S %s\n' "$s" >> "$INPUT_FILE"
+  unset s
+  printf "${DIM}Collected %d node ID(s) + seed. Searching may take a few seconds...${R}\n" "$n"
+  return 0
+}
+
 # ==========================================================================
 # Claim (hands off to the official Nesa CLI, interactive & confirmed)
 # ==========================================================================
@@ -416,7 +526,8 @@ show_menu() {
   printf "  ${B}2${R}) ${CYN}Private key checker${R}      ${DIM}- one private key${R}\n"
   printf "  ${B}3${R}) ${CYN}Batch private key checker${R}${DIM}- many keys at once${R}\n"
   printf "  ${B}4${R}) ${CYN}Match keys to node IDs${R}   ${DIM}- which key unlocks which node${R}\n"
-  printf "  ${B}5${R}) ${GRN}Claim rewards${R}            ${DIM}- submit a real claim (official CLI)${R}\n"
+  printf "  ${B}5${R}) ${CYN}Recover key from seed${R}    ${DIM}- find the node key from your seed phrase${R}\n"
+  printf "  ${B}6${R}) ${GRN}Claim rewards${R}            ${DIM}- submit a real claim (official CLI)${R}\n"
   printf "  ${B}q${R}) ${DIM}Quit${R}\n"
 }
 
@@ -433,7 +544,8 @@ while true; do
     2) if collect_one_key;    then "$PYTHON" "$RUNNER_PY" key    "$INPUT_FILE"; fi ;;
     3) if collect_batch_keys; then "$PYTHON" "$RUNNER_PY" batch  "$INPUT_FILE"; fi ;;
     4) if collect_match;      then "$PYTHON" "$RUNNER_PY" match  "$INPUT_FILE"; fi ;;
-    5) do_claim || true ;;
+    5) if collect_seed;       then "$PYTHON" "$RUNNER_PY" seed   "$INPUT_FILE"; fi ;;
+    6) do_claim || true ;;
     q|Q|quit|exit) break ;;
     *) err "Invalid choice: $choice" ;;
   esac

@@ -24,7 +24,8 @@ You'll get a terminal menu:
   2) Private key checker      - one private key
   3) Batch private key checker- many keys at once
   4) Match keys to node IDs   - which key unlocks which node
-  5) Claim rewards            - submit a real claim (official CLI)
+  5) Recover key from seed    - find the node key from your seed phrase
+  6) Claim rewards            - submit a real claim (official CLI)
   q) Quit
 ```
 
@@ -40,7 +41,16 @@ Paste many private keys, one per line (hidden). The tool checks them all and pri
 ### 4) Match keys to node IDs
 Don't know which key belongs to which eligible node? Paste your **eligible Node IDs** first, then your **private keys** (hidden). The tool derives each key's Node ID and tells you exactly which key unlocks which eligible node — and which eligible nodes you're still missing a key for.
 
-### 5) Claim rewards
+### 5) Recover key from seed
+Lost the node's private key but still have your **seed phrase**? Paste your eligible Node ID(s), then your seed phrase (12/24 words, hidden). The tool scans standard BIP39/BIP32 derivation paths (coin types 118/60/0/529/330/459/494, accounts and indexes) and, for any path whose derived key reproduces an eligible Node ID, prints the **exact private key**, derivation path, Cosmos address and allocation. Everything runs locally.
+
+Widen the search if needed:
+```bash
+NESA_ACCOUNTS=16 NESA_INDEXES=60 NESA_EXTRA_COINS='234 564 818' bash check-nesa-allocation.sh
+```
+Optional BIP39 passphrase (25th word): `NESA_BIP39_PASSPHRASE='...'`.
+
+### 6) Claim rewards
 Submits a **real on-chain claim** by handing off to the official Nesa CLI. You paste the node's private key (hidden) and the EVM address to receive the reward. It runs the official CLI **interactively** (never with `-y`), so you still confirm the Terms and the claim yourself before anything is submitted.
 
 Options 1–4 are read-only and retry automatically on transient server errors.
