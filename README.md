@@ -1,65 +1,102 @@
 # Nesa Allocation Checker
 
-A single interactive terminal tool to check your **Nesa miner rewards allocation** — and now to **claim** them too. Checking is read-only; claiming hands off to the official CLI and always asks you to confirm.
+An interactive terminal tool to check a Nesa miner allocation and submit it through Nesa's **official alternate-key claim method**.
 
-Reuses the official [`nesaorg/miner-rewards-cli`](https://github.com/nesaorg/miner-rewards-cli) logic, so derived identities and results match exactly.
+This repository was updated for Nesa's July 2026 fix for miners whose allocated Node ID differs from the Node ID that the original claim CLI derives from `NODE_PRIV_KEY`.
+
+## Why the old method failed
+
+Some Nesa installations generated and stored a Node ID independently from the secp256k1 private key in `orchestrator.env`. Reinstalling could also leave miners with an allocated Node ID and a different signing identity. The original CLI derived a new Node ID from the private key, queried that different ID, and incorrectly appeared to show no allocation.
+
+Nesa's alternate method fixes this by treating the two proofs separately:
+
+1. You provide the **actual Miner ID / Node ID** that has the allocation.
+2. You provide the **secp256k1 private key** that signed the node's latest miner requests/heartbeats.
+3. Nesa verifies the derived compressed public key against its registered key for that Node ID.
+
+The private key does not need to reproduce the Node ID.
+
+Official sources:
+
+- [Nesa alternate-key CLI branch](https://github.com/nesaorg/miner-rewards-cli/tree/alternate-key-cli#alternate-claim)
+- [Official alternate claim script](https://github.com/nesaorg/miner-rewards-cli/blob/alternate-key-cli/claim-rewards-alt.sh)
+- [Original identity mismatch report and confirmed resolution](https://github.com/nesaorg/miner-rewards-cli/issues/1)
 
 ## Requirements
-- `python3` and `curl` (deps auto-install in an isolated venv on first run)
 
-## Clone & run
+- Linux or another Bash-compatible environment
+- `bash`, `curl`, and `python3`
+- Internet access to GitHub and `rewards-proxy.nesa.ai`
+
+The official Nesa claim CLI creates its own Python virtual environment and installs its pinned Python dependencies on first use.
+
+## Install and run
+
 ```bash
 git clone https://github.com/reza7277/nesa-allocation-checker.git
 cd nesa-allocation-checker
 bash check-nesa-allocation.sh
 ```
 
-You'll get a terminal menu:
+Menu:
 
-```
-  ╔══════════════════════════════╗
-  ║      NESA REWARDS CHECKER     ║
-  ╚══════════════════════════════╝
-  1) Node ID checker          - by Node ID, no key needed
-  2) Private key checker      - one private key
-  3) Batch private key checker- many keys at once
-  4) Match keys to node IDs   - which key unlocks which node
-  5) Recover key from seed    - find the node key from your seed phrase
-  6) Claim rewards            - submit a real claim (official CLI)
+```text
+  1) Check allocation   - Node ID only, read-only
+  2) Claim allocation   - fixed alternate-key method
   q) Quit
 ```
 
-### 1) Node ID checker
-Enter one or more Node IDs (one per line). Checks allocation without any private key. If you accidentally paste a 64-char hex **private key** here, the tool detects it and tells you to use option 2/3 instead.
+## Check an allocation
 
-### 2) Private key checker
-Paste a single node private key (64-char hex, no `0x`, hidden input). Derives your Cosmos address + Node ID locally, then shows your allocation.
+Choose option 1 and enter one or more Node IDs. This is read-only and does not ask for a private key. Only the Node IDs are sent to Nesa's official allocation endpoint.
 
-### 3) Batch private key checker
-Paste many private keys, one per line (hidden). The tool checks them all and prints a per-key result (with the **full** derived Node ID so you can compare it against your eligible list) plus a **summary** with total and still-claimable NES.
+## Claim an allocation
 
-### 4) Match keys to node IDs
-Don't know which key belongs to which eligible node? Paste your **eligible Node IDs** first, then your **private keys** (hidden). The tool derives each key's Node ID and tells you exactly which key unlocks which eligible node — and which eligible nodes you're still missing a key for.
+Choose option 2 and enter:
 
-### 5) Recover key from seed
-Lost the node's private key but still have your **seed phrase**? Paste your eligible Node ID(s), then your seed phrase (12/24 words, hidden). The tool scans standard BIP39/BIP32 derivation paths (coin types 118/60/0/529/330/459/494, accounts and indexes) and, for any path whose derived key reproduces an eligible Node ID, prints the **exact private key**, derivation path, Cosmos address and allocation. Everything runs locally.
+1. The exact Node ID that shows an allocation.
+2. The alternate `NODE_PRIV_KEY` used to sign that node's requests (input is hidden).
+3. A destination EVM address, or leave it empty and enter it in the official CLI.
 
-Widen the search if needed:
+The wrapper then launches Nesa's official alternate-key CLI interactively. It never passes `-y`, so you must verify the displayed Node ID/public key, accept the Terms, and confirm the final claim yourself.
+
+## Security design
+
+- Claim logic is not reimplemented here; the signed payload is built and submitted by Nesa's official `claim-rewards-alt.sh`.
+- The official file is pinned to commit `b204312dd53104df9680f08438c15e25177c0dc8` and must match SHA-256 `9e040755e5633957aa47807adbebb5c8ad9b4fcd86c5fc8228197942d46ce41d` before the tool writes a private key to disk or executes it.
+- The pinned official CLI has a display-only formatting bug that renders integer amounts ending in zero incorrectly (`30` as `3`, for example). The wrapper applies one exact replacement after the official hash passes, then requires patched SHA-256 `29bc7697950c014fdd590723fe18893ae2efa75a59fbe04385d173340eb01708`. This patch does not touch claim payloads, signatures, endpoints, or raw allocation values.
+- Private-key input is hidden and stored only in a mode-`600` temporary file inside a mode-`700` temporary directory.
+- The temporary key file is deleted immediately after the official CLI exits and again by the exit trap as a fallback.
+- No Seed Phrase is needed. Never paste a Seed Phrase into this tool, a website, Telegram, Discord, or support chat.
+- Claim transactions are irreversible. Verify the destination EVM address and the explorer result carefully.
+
+> Deleting a temporary file is best-effort cleanup; no software can honestly guarantee physical erasure from SSDs, snapshots, swap, or terminal/session recording. Run the tool only on a trusted machine.
+
+## Why the old key/seed modes were removed
+
+The previous Private-key checker, key-to-Node-ID matcher, and Seed recovery modes assumed the private key must deterministically reproduce the allocated Node ID. That assumption is precisely what Nesa's alternate claim method was created to bypass. Keeping those modes would produce misleading “no allocation” or “no match” results for affected miners.
+
+## Common official errors
+
+- **Public key does not match the registered key:** the private key is not the latest alternate signing key registered for that Node ID.
+- **Node ID is not registered:** that Node ID is not in Nesa's alternate-key claims datastore; contact official Nesa support.
+- **No available allocation:** the allocation is zero or has already been claimed.
+- **Signature verification failed:** recheck the Node ID and private key; do not keep retrying blindly.
+- **Transient `clique_api` error:** first check the explorer and the CLI summary. If no claim was submitted, retry the same Node ID later; the official issue reporter confirmed that a later retry succeeded.
+
+The tool deliberately does not auto-retry claim submissions.
+
+## Direct official command
+
+Nesa's corrected official command includes `bash` before process substitution:
+
 ```bash
-NESA_ACCOUNTS=16 NESA_INDEXES=60 NESA_EXTRA_COINS='234 564 818' bash check-nesa-allocation.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/nesaorg/miner-rewards-cli/alternate-key-cli/claim-rewards-alt.sh) \
+  --node-id "YOUR_NODE_ID_HERE"
 ```
-Optional BIP39 passphrase (25th word): `NESA_BIP39_PASSPHRASE='...'`.
 
-### 6) Claim rewards
-Submits a **real on-chain claim** by handing off to the official Nesa CLI. You paste the node's private key (hidden) and the EVM address to receive the reward. It runs the official CLI **interactively** (never with `-y`), so you still confirm the Terms and the claim yourself before anything is submitted.
-
-Options 1–4 are read-only and retry automatically on transient server errors.
-
-## Security
-- Private keys are used **locally only**, kept in a temp file (`umask 077`) that is wiped after each run and deleted on exit.
-- Read-only modes only send allocation queries to `rewards-proxy.nesa.ai`.
-- Claiming uses the official `nesaorg/miner-rewards-cli` and signs locally; your key is never uploaded.
-- **Never share your private keys or seed phrase with anyone.** Run this only on a machine you trust.
+The wrapper in this repository is safer for public sharing because it verifies a pinned copy of that official script before handling a private key.
 
 ---
-*Not affiliated with Nesa. Use at your own risk.*
+
+Not affiliated with Nesa. Use at your own risk and follow Nesa's Terms of Use.
